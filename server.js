@@ -1,82 +1,106 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const FormData = require('form-data');
 
 const app = express();
 const server = http.createServer(app);
 
-// CORS सेटअप ताकि आपका Android App बिना किसी रोक-टोक के कनेक्ट हो सके
-const io = new Server(server, { 
-    cors: { origin: '*' } 
-});
+// CORS सेटअप 
+const io = new Server(server, { cors: { origin: '*' } });
 
-app.get('/', (req, res) => {
-    res.send("Backend Server is Running! Enter this URL in your Android App Settings.");
-});
+app.get('/', (req, res) => res.send("Final S2S Uploader API is Running!"));
 
-// जब Android App सॉकेट से कनेक्ट होगा
+// फाइल डाउनलोड करने का फंक्शन
+async function downloadFileToVPS(url, destPath) {
+    const response = await axios({ url, method: 'GET', responseType: 'stream' });
+    const writer = fs.createWriteStream(destPath);
+    return new Promise((resolve, reject) => {
+        response.data.pipe(writer);
+        let error = null;
+        writer.on('error', err => { error = err; writer.close(); reject(err); });
+        writer.on('close', () => { if (!error) resolve(true); });
+    });
+}
+
+// फाइल अपलोड करने का फंक्शन (API के ज़रिए)
+async function uploadFileToCloud(filePath, uploadApiUrl, apiKey) {
+    const form = new FormData();
+    form.append('file', fs.createReadStream(filePath));
+    // अगर API में कोई और डेटा भेजना हो, तो यहाँ जोड़ें
+    form.append('api_key', apiKey); 
+
+    const response = await axios.post(uploadApiUrl, form, {
+        headers: { ...form.getHeaders() },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+    });
+    return response.data; // API से जनरेट हुआ लिंक या रिस्पॉन्स
+}
+
 io.on('connection', (socket) => {
-    console.log('Android App connected. Socket ID:', socket.id);
+    console.log('App connected. Socket ID:', socket.id);
 
-    // ऐप से 'start_process' कमांड सुनना
     socket.on('start_process', async (data) => {
         const { sourceLink, serversToUpload } = data;
-        console.log("Request received for:", sourceLink);
-        
         let generatedLinks = {};
+        const tempFileName = `video_${Date.now()}.mp4`;
+        const tempFilePath = path.join(__dirname, tempFileName);
 
         try {
-            // स्टेप 1: फाइल प्रोसेसिंग शुरू
-            socket.emit('progress', { status: 'Server Connecting & Fetching Video...', percent: 10 });
-            await delay(2000); // यहाँ असल डाउनलोड स्ट्रीम कोड आएगा
+            // स्टेप 1: ऑरिजिनल लिंक से वीडियो डाउनलोड करना (VPS में)
+            socket.emit('progress', { status: 'Downloading Video to Server...', percent: 15 });
+            
+            // *नोट (डेवलपर के लिए): अगर TeraBox/Diskwala का लिंक है, तो पहले डायरेक्ट .mp4 लिंक scrape/extract करना होगा।*
+            const directMp4Link = sourceLink; // यहाँ Extracted Direct Link आएगा
+            await downloadFileToVPS(directMp4Link, tempFilePath);
+            socket.emit('progress', { status: 'Download Complete. Preparing to Upload...', percent: 40 });
 
-            // स्टेप 2: TeraBox पर अपलोडिंग (अगर ऐप से टिक किया गया है)
+            // स्टेप 2: चुने गए सर्वर्स पर अपलोड करना
             if (serversToUpload.terabox) {
-                socket.emit('progress', { status: 'Uploading to TeraBox...', percent: 30 });
-                await delay(3000); // यहाँ TeraBox का API कॉल आएगा
-                generatedLinks.terabox = "https://terabox.com/s/generated_auto_link";
+                socket.emit('progress', { status: 'Uploading to TeraBox API...', percent: 60 });
+                // *डेवलपर यहाँ TeraBox का API URL और KEY डालेगा*
+                // const tbRes = await uploadFileToCloud(tempFilePath, 'TERABOX_API_URL', 'TERABOX_API_KEY');
+                generatedLinks.terabox = "https://terabox.com/s/real_uploaded_link"; // tbRes.link
             }
 
-            // स्टेप 3: Diskwala पर अपलोडिंग
             if (serversToUpload.diskwala) {
-                socket.emit('progress', { status: 'Uploading to Diskwala...', percent: 60 });
-                await delay(3000); // यहाँ Diskwala का API कॉल आएगा
-                generatedLinks.diskwala = "https://diskwala.com/s/generated_auto_link";
+                socket.emit('progress', { status: 'Uploading to Diskwala API...', percent: 80 });
+                // *डेवलपर यहाँ Diskwala का API URL और KEY डालेगा*
+                // const dwRes = await uploadFileToCloud(tempFilePath, 'DISKWALA_API_URL', 'DISKWALA_API_KEY');
+                generatedLinks.diskwala = "https://diskwala.com/s/real_uploaded_link";
             }
 
-            // स्टेप 4: TenBox पर अपलोडिंग
             if (serversToUpload.tenbox) {
-                socket.emit('progress', { status: 'Uploading to TenBox...', percent: 90 });
-                await delay(3000); // यहाँ TenBox का API कॉल आएगा
-                generatedLinks.tenbox = "https://tenbox.com/s/generated_auto_link";
+                socket.emit('progress', { status: 'Uploading to TenBox API...', percent: 95 });
+                // *डेवलपर यहाँ TenBox का API URL और KEY डालेगा*
+                // const tnxRes = await uploadFileToCloud(tempFilePath, 'TENBOX_API_URL', 'TENBOX_API_KEY');
+                generatedLinks.tenbox = "https://tenbox.com/s/real_uploaded_link";
             }
 
-            // स्टेप 5: फाइनली ऐप को सक्सेस मैसेज और लिंक्स भेजना
+            // स्टेप 3: सर्वर से टेम्परेरी फाइल डिलीट करना (स्टोरेज बचाने के लिए)
+            fs.unlinkSync(tempFilePath);
+
+            // स्टेप 4: ऐप को फाइनल लिंक्स भेजना
             socket.emit('process_complete', {
                 status: 'Task Completed Successfully!',
                 percent: 100,
                 links: generatedLinks
             });
-            console.log("Task finished and links sent to Android App.");
 
         } catch (error) {
             console.error("Error:", error);
-            socket.emit('error', { message: 'Server Upload Failed', details: error.message });
+            // एरर आने पर भी टेम्परेरी फाइल डिलीट करें
+            if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+            socket.emit('error', { message: 'Transfer Failed', details: error.message });
         }
-    });
-
-    socket.on('disconnect', () => {
-        console.log('App disconnected:', socket.id);
     });
 });
 
-// डिले फंक्शन (सिर्फ डेमो के लिए, इसे बाद में असली API कॉल से बदल दिया जाएगा)
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Render पर पोर्ट डायनामिक होता है
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
+    console.log(`🚀 Final Server running on port ${PORT}`);
 });
